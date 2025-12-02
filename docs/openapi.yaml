@@ -1,0 +1,551 @@
+openapi: 3.1.0
+info:
+  title: RAGCache API
+  version: 0.1.0
+  description: |
+    # RAGCache API
+
+    A high-performance caching layer for Large Language Model (LLM) queries with exact and semantic matching capabilities.
+
+    ## Overview
+
+    RAGCache sits between your application and LLM providers (OpenAI, Anthropic) to:
+    - **Save Money** - Avoid paying for duplicate queries
+    - **Reduce Latency** - Return cached responses in ~2ms instead of ~10 seconds
+    - **Increase Reliability** - Reduce dependency on external APIs
+
+    ## Cache Strategy
+
+    ```
+    User Query -> Exact Match (Redis) -> Semantic Match (Qdrant) -> LLM (if needed)
+                       |                       |                      |
+                   ~1ms hit              ~450ms hit              ~8,500ms
+    ```
+
+    ## Authentication
+
+    Protected endpoints require an API key passed in the `X-API-Key` header.
+
+    ## Rate Limiting
+
+    - **60 requests per minute** per client
+    - **1000 requests per hour** per client
+
+    Rate limit headers are included in responses:
+    - `X-RateLimit-Limit`: Maximum requests per window
+    - `X-RateLimit-Remaining`: Requests remaining
+    - `X-RateLimit-Reset`: Unix timestamp when limit resets
+
+  contact:
+    name: RAGCache Team
+    url: https://github.com/ragcache/ragcache
+    email: support@ragcache.io
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8000
+    description: Local development server
+  - url: https://api.ragcache.io
+    description: Production server
+
+tags:
+  - name: health
+    description: Health check endpoints for monitoring service status
+  - name: query
+    description: Query processing endpoints - submit queries to get cached or fresh LLM responses
+  - name: metrics
+    description: Metrics and monitoring endpoints for observability
+  - name: cache
+    description: Cache management endpoints
+
+paths:
+  /health:
+    get:
+      tags:
+        - health
+      summary: Basic health check
+      description: Returns basic health status of the service
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: healthy
+                environment: development
+                version: "0.1.0"
+
+  /healthz:
+    get:
+      tags:
+        - health
+      summary: Kubernetes liveness probe
+      description: Kubernetes-style liveness check endpoint
+      operationId: kubernetesHealthCheck
+      responses:
+        '200':
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /ready:
+    get:
+      tags:
+        - health
+      summary: Kubernetes readiness probe
+      description: |
+        Checks all dependencies and returns detailed status.
+        Use this endpoint to verify the service is ready to handle requests.
+      operationId: readinessCheck
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetailedHealthResponse'
+              example:
+                status: healthy
+                environment: development
+                version: "0.1.0"
+                components:
+                  redis:
+                    status: healthy
+                    latency_ms: 1.5
+                  qdrant:
+                    status: healthy
+                    latency_ms: 3.2
+
+  /live:
+    get:
+      tags:
+        - health
+      summary: Liveness check
+      description: Always returns healthy if the application is running
+      operationId: livenessCheck
+      responses:
+        '200':
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /api/v1/query:
+    post:
+      tags:
+        - query
+      summary: Process query with caching
+      description: |
+        Process a query with intelligent caching.
+
+        The query goes through the following pipeline:
+        1. **Exact Cache Check** - Look for identical query in Redis (~1ms)
+        2. **Semantic Cache Check** - Look for similar queries in Qdrant (~450ms)
+        3. **LLM Call** - If no cache hit, call the LLM provider (~8,500ms)
+        4. **Cache Storage** - Store response in both caches for future use
+
+      operationId: processQuery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryRequest'
+            examples:
+              basic:
+                summary: Basic query
+                value:
+                  query: "What is machine learning?"
+              with_options:
+                summary: Query with options
+                value:
+                  query: "Explain neural networks"
+                  provider: "openai"
+                  model: "gpt-4"
+                  temperature: 0.5
+                  max_tokens: 1000
+              no_cache:
+                summary: Query without cache
+                value:
+                  query: "What is deep learning?"
+                  use_cache: false
+      responses:
+        '200':
+          description: Query processed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryResponse'
+              examples:
+                cache_miss:
+                  summary: Cache miss - LLM response
+                  value:
+                    response: "Machine learning is a subset of AI..."
+                    provider: "openai"
+                    model: "gpt-4o-mini-2024-07-18"
+                    usage:
+                      prompt_tokens: 12
+                      completion_tokens: 418
+                      total_tokens: 430
+                    cache_info:
+                      cache_hit: false
+                      cache_type: null
+                    latency_ms: 10090.93
+                exact_hit:
+                  summary: Exact cache hit
+                  value:
+                    response: "Machine learning is a subset of AI..."
+                    provider: "openai"
+                    model: "gpt-4o-mini-2024-07-18"
+                    usage:
+                      prompt_tokens: 12
+                      completion_tokens: 418
+                      total_tokens: 430
+                    cache_info:
+                      cache_hit: true
+                      cache_type: "exact"
+                    latency_ms: 1.11
+                semantic_hit:
+                  summary: Semantic cache hit
+                  value:
+                    response: "Machine learning is a subset of AI..."
+                    provider: "openai"
+                    model: "gpt-4o-mini-2024-07-18"
+                    usage:
+                      prompt_tokens: 0
+                      completion_tokens: 0
+                      total_tokens: 0
+                    cache_info:
+                      cache_hit: true
+                      cache_type: "semantic"
+                      similarity_score: 0.8563
+                    latency_ms: 457.89
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: LLM provider error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/metrics:
+    get:
+      tags:
+        - metrics
+      summary: Get application metrics
+      description: |
+        Returns comprehensive application metrics including:
+        - Application info
+        - Pipeline performance (requests, cache hits, latency)
+        - Redis cache statistics
+        - Configuration settings
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Metrics retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricsResponse'
+              example:
+                application:
+                  name: "RAGCache"
+                  environment: "development"
+                  version: "0.1.0"
+                pipeline:
+                  total_requests: 150
+                  cache_hits: 87
+                  cache_hit_rate: 0.58
+                  avg_latency_ms: 125.5
+                cache:
+                  total_keys: 286
+                  memory_used_bytes: 1585248
+                  hits: 87
+                  misses: 63
+                  hit_rate: 0.58
+                config:
+                  semantic_cache_enabled: true
+                  exact_cache_enabled: true
+                  similarity_threshold: 0.85
+                  cache_ttl_seconds: 3600
+
+  /api/v1/metrics/prometheus:
+    get:
+      tags:
+        - metrics
+      summary: Get Prometheus metrics
+      description: |
+        Returns metrics in Prometheus text exposition format.
+        Use this endpoint for Prometheus scraping.
+      operationId: getPrometheusMetrics
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP ragcache_info Application information
+                # TYPE ragcache_info gauge
+                ragcache_info{version="0.1.0",environment="development"} 1
+
+                # HELP ragcache_requests_total Total requests processed
+                # TYPE ragcache_requests_total counter
+                ragcache_requests_total 150
+
+                # HELP ragcache_cache_hits_total Total cache hits
+                # TYPE ragcache_cache_hits_total counter
+                ragcache_cache_hits_total 87
+
+components:
+  schemas:
+    QueryRequest:
+      type: object
+      required:
+        - query
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: The query text to process
+          example: "What is the capital of France?"
+        provider:
+          type: string
+          enum: ["openai", "anthropic"]
+          description: LLM provider to use (defaults to config)
+          example: "openai"
+        model:
+          type: string
+          description: Specific model name
+          example: "gpt-3.5-turbo"
+        max_tokens:
+          type: integer
+          minimum: 1
+          maximum: 4000
+          description: Maximum tokens in response
+          example: 500
+        temperature:
+          type: number
+          minimum: 0.0
+          maximum: 2.0
+          description: Response randomness (0=deterministic, 2=creative)
+          example: 0.7
+        use_cache:
+          type: boolean
+          default: true
+          description: Enable cache lookup
+        use_semantic_cache:
+          type: boolean
+          default: true
+          description: Enable semantic similarity search
+
+    QueryResponse:
+      type: object
+      required:
+        - response
+        - provider
+        - model
+        - usage
+        - cache_info
+        - latency_ms
+      properties:
+        response:
+          type: string
+          description: LLM response text
+        provider:
+          type: string
+          description: LLM provider used
+        model:
+          type: string
+          description: Model used
+        usage:
+          $ref: '#/components/schemas/UsageMetrics'
+        cache_info:
+          $ref: '#/components/schemas/CacheInfo'
+        latency_ms:
+          type: number
+          minimum: 0
+          description: Request latency in milliseconds
+
+    UsageMetrics:
+      type: object
+      required:
+        - prompt_tokens
+        - completion_tokens
+        - total_tokens
+      properties:
+        prompt_tokens:
+          type: integer
+          minimum: 0
+          description: Tokens in prompt
+        completion_tokens:
+          type: integer
+          minimum: 0
+          description: Tokens in completion
+        total_tokens:
+          type: integer
+          minimum: 0
+          description: Total tokens used
+
+    CacheInfo:
+      type: object
+      required:
+        - cache_hit
+      properties:
+        cache_hit:
+          type: boolean
+          description: Whether cache was hit
+        cache_type:
+          type: string
+          enum: ["exact", "semantic", null]
+          description: Type of cache hit
+        similarity_score:
+          type: number
+          minimum: 0.0
+          maximum: 1.0
+          description: Semantic similarity score (only for semantic hits)
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - environment
+        - version
+      properties:
+        status:
+          type: string
+          enum: ["healthy", "unhealthy"]
+          description: Service status
+        environment:
+          type: string
+          description: Environment name
+        version:
+          type: string
+          description: Application version
+
+    DetailedHealthResponse:
+      type: object
+      required:
+        - status
+        - environment
+        - version
+      properties:
+        status:
+          type: string
+          enum: ["healthy", "unhealthy", "degraded"]
+          description: Overall status
+        environment:
+          type: string
+          description: Environment name
+        version:
+          type: string
+          description: Application version
+        components:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ComponentHealth'
+          description: Component health status
+        uptime_seconds:
+          type: number
+          description: Uptime in seconds
+
+    ComponentHealth:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: ["healthy", "unhealthy", "degraded"]
+          description: Component status
+        latency_ms:
+          type: number
+          description: Check latency in ms
+        message:
+          type: string
+          description: Status message
+
+    MetricsResponse:
+      type: object
+      properties:
+        application:
+          type: object
+          properties:
+            name:
+              type: string
+            environment:
+              type: string
+            version:
+              type: string
+        pipeline:
+          type: object
+          properties:
+            total_requests:
+              type: integer
+            cache_hits:
+              type: integer
+            cache_hit_rate:
+              type: number
+            avg_latency_ms:
+              type: number
+        cache:
+          type: object
+          properties:
+            total_keys:
+              type: integer
+            memory_used_bytes:
+              type: integer
+            hits:
+              type: integer
+            misses:
+              type: integer
+            hit_rate:
+              type: number
+        config:
+          type: object
+          properties:
+            semantic_cache_enabled:
+              type: boolean
+            exact_cache_enabled:
+              type: boolean
+            similarity_threshold:
+              type: number
+            cache_ttl_seconds:
+              type: integer
+
+    ErrorResponse:
+      type: object
+      required:
+        - detail
+      properties:
+        detail:
+          type: string
+          description: Error message
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for authentication
